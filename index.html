@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f9f2e8">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icon-192.png">
+<title>ספר המתכונים שלי</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f9f2e8;color:#35271f;font:17px system-ui,sans-serif}main{max-width:740px;margin:auto;padding:24px 18px 48px}h1,h2{font-family:Georgia,serif}h1{font-size:clamp(2rem,8vw,3.8rem);margin:.3em 0}button,input,textarea,select{font:inherit;color:inherit}button,input,textarea,select{padding:10px 13px;border:1px solid #cdbbac;border-radius:12px;background:#fffaf4}button{cursor:pointer;min-height:44px}button.primary,button[aria-pressed=true]{background:#713c2a;color:white;border-color:#713c2a}input,textarea,select{width:100%}input[type=checkbox]{width:auto}textarea{min-height:90px}label{display:block;margin:12px 0}.row{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(180px,100%),1fr));gap:10px}.card{text-align:start;overflow-wrap:anywhere}.card img,article img{display:block;width:100%;aspect-ratio:3/2;object-fit:cover;border-radius:9px;margin-bottom:8px}article,form{padding:18px;background:#fffaf4;border-radius:18px}p,li{overflow-wrap:anywhere}li{margin-block:8px}.note{white-space:pre-wrap}small{color:#624e43}a{color:#713c2a}
+</style>
+<main>
+<header><h1>ספר המתכונים שלי</h1></header>
+<p id="status" role="status"></p>
+<section id="home">
+<div class="row"><button id="add" class="primary">＋ מתכון חדש</button><button id="random">מה נכין היום?</button></div>
+<input id="search" type="search" placeholder="חיפוש מתכונים" aria-label="חיפוש מתכונים">
+<nav id="categories" class="row" aria-label="קטגוריות"></nav>
+<div id="lists"></div>
+<footer><div class="row"><button id="backup">הורדת גיבוי</button><button id="restore">שחזור מגיבוי</button></div>
+<small>המתכונים נשמרים במכשיר הזה. כדאי לשמור גיבוי לפני מעבר למכשיר אחר או מחיקת נתוני הדפדפן.</small>
+<input id="importFile" type="file" accept=".json,application/json" hidden></footer>
+</section>
+<section id="detail" hidden></section>
+<section id="editor" hidden>
+<button class="back">חזרה לספר</button>
+<h2 id="editorTitle"></h2>
+<form id="recipeForm">
+<label>שם המתכון<input name="title" required maxlength="150"></label>
+<label>קטגוריה<select name="category"></select></label>
+<label>תמונה<input name="photo" type="file" accept="image/*"></label>
+<label id="removePhoto" hidden><input name="remove" type="checkbox"> הסרת התמונה הקיימת</label>
+<label>מצרכים וכמויות<textarea name="ingredients" required placeholder="כל מצרך בשורה, עם הכמות בהתחלה. למשל: 1/2 כוס סוכר"></textarea></label>
+<label>הוראות הכנה<textarea name="steps" required placeholder="כל שלב בשורה נפרדת"></textarea></label>
+<label>זמן הכנה בדקות<input name="prep" type="number" min="0"></label>
+<label>זמן בישול בדקות<input name="cook" type="number" min="0"></label>
+<label>מספר מנות או יחידות<input name="servings" type="number" min="1" value="4" required></label>
+<label>רמת קושי<select name="difficulty"><option>קל</option><option>בינוני</option><option>מאתגר</option></select></label>
+<label>הערות וטיפים<textarea name="notes"></textarea></label>
+<label>קישור לסרטון המקורי<input name="video" type="url" dir="ltr"></label>
+<button class="primary" type="submit">שמירת מתכון</button>
+</form>
+</section>
+</main>
+<script>
+'use strict';
+const byId = id => document.getElementById(id);
+const categories = ['מאפים ולחמים','עוגות וקינוחים','עוגיות','רטבים וממרחים','מרקים'];
+const fields = ['title','category','ingredients','steps','prep','cook','servings','difficulty','notes','video'];
+const form = byId('recipeForm');
+const field = name => form.elements.namedItem(name);
+const lines = value => value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+let recipes = [], category = '', editing = null;
+const db = new Promise((resolve, reject) => {
+  const request = indexedDB.open('my-recipes', 1);
+  request.onupgradeneeded = () => request.result.createObjectStore('recipes', {keyPath:'id'});
+  request.onsuccess = () => resolve(request.result);
+  request.onerror = () => reject(request.error);
+});
+async function store(mode, work) {
+  const database = await db;
+  return new Promise((resolve, reject) => {
+    const tx = database.transaction('recipes', mode);
+    const result = work(tx.objectStore('recipes'));
+    tx.oncomplete = () => resolve(result?.result);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+const report = message => { byId('status').textContent = message; };
+function action(node, run) {
+  node.addEventListener('click', async () => {
+    report('');
+    try { await run(); } catch { report('הפעולה לא הושלמה. אפשר לנסות שוב.'); }
+  });
+}
+function element(tag, content, parent) {
+  const node = document.createElement(tag);
+  if (content) node.textContent = content;
+  parent?.append(node);
+  return node;
+}
+function button(label, parent, run) {
+  const node = element('button', label, parent);
+  node.type = 'button';
+  action(node, run);
+  return node;
+}
+function show(id) {
+  for (const section of ['home','detail','editor']) byId(section).hidden = section !== id;
+  window.scrollTo(0, 0);
+}
+function photo(recipe, parent) {
+  if (recipe.photo) {
+    const img = element('img', '', parent);
+    img.src = recipe.photo;
+    img.alt = '';
+  }
+}
+function render() {
+  const nav = byId('categories');
+  nav.replaceChildren();
+  for (const label of ['', ...categories]) {
+    const control = button(label || 'הכול', nav, () => { category = label; render(); });
+    control.setAttribute('aria-pressed', String(category === label));
+  }
+  const query = byId('search').value.trim().toLocaleLowerCase();
+  const matches = recipes.filter(recipe => (!category || recipe.category === category) &&
+    [recipe.title, recipe.ingredients, recipe.notes].some(value => value.toLocaleLowerCase().includes(query)));
+  const lists = byId('lists');
+  lists.replaceChildren();
+  function group(title, items, empty) {
+    element('h2', title, lists);
+    if (!items.length) { element('p', empty, lists); return; }
+    const cards = element('div', '', lists);
+    cards.className = 'cards';
+    for (const recipe of items) {
+      const card = button('', cards, () => detail(recipe));
+      card.className = 'card';
+      photo(recipe, card);
+      element('strong', recipe.title, card);
+      element('div', recipe.category, card);
+    }
+  }
+  if (query || category) group(category || 'תוצאות חיפוש', matches, 'אין מתכונים מתאימים.');
+  else {
+    group('נוספו לאחרונה', matches.slice(0, 4), 'הספר שלך מחכה למתכון הראשון.');
+    group('מועדפים', matches.filter(recipe => recipe.favorite), 'אפשר לסמן מתכונים כמועדפים מתוך המתכון.');
+    if (matches.length > 4) group('כל המתכונים', matches, '');
+  }
+}
+async function refresh() {
+  recipes = (await store('readonly', table => table.getAll())).sort((a,b) => b.created - a.created);
+  render();
+}
+function home() { render(); show('home'); }
+function edit(recipe) {
+  editing = recipe;
+  form.reset();
+  byId('editorTitle').textContent = recipe ? 'עריכת מתכון' : 'מתכון חדש';
+  byId('removePhoto').hidden = !recipe?.photo;
+  if (recipe) for (const name of fields) field(name).value = recipe[name];
+  show('editor');
+  field('title').focus();
+}
+const fraction = {'¼':.25,'½':.5,'¾':.75,'⅓':1/3,'⅔':2/3,'⅛':.125,'⅜':.375,'⅝':.625,'⅞':.875};
+function scale(line, ratio) {
+  if (ratio === 1) return line;
+  const amount = /^(\d+\s+\d+\/\d+|\d*\s*[¼½¾⅓⅔⅛⅜⅝⅞]|\d+\/\d+|\d+(?:[.,]\d+)?)(?=\s|$)/;
+  return line.replace(amount, value => {
+    const [whole, part] = value.trim().split(/\s+/);
+    const number = token => {
+      const last = token.at(-1);
+      if (last in fraction) return Number(token.slice(0,-1)) + fraction[last];
+      const [top, bottom] = token.split('/');
+      return bottom === undefined ? Number(top.replace(',','.')) : Number(top)/Number(bottom);
+    };
+    const quantity = number(whole) + (part ? number(part) : 0);
+    return Number.isFinite(quantity) ? new Intl.NumberFormat('he', {maximumSignificantDigits:4}).format(quantity * ratio) : value;
+  });
+}
+function detail(recipe) {
+  const view = byId('detail');
+  view.replaceChildren();
+  button('חזרה לספר', view, home);
+  const article = element('article', '', view);
+  element('h2', recipe.title, article);
+  photo(recipe, article);
+  element('p', [recipe.category, recipe.difficulty, recipe.prep && 'הכנה ' + recipe.prep + ' דקות',
+    recipe.cook && 'בישול ' + recipe.cook + ' דקות'].filter(Boolean).join(' · '), article);
+  const controls = element('div', '', article);
+  controls.className = 'row';
+  const favorite = button(recipe.favorite ? '★ הסרה ממועדפים' : '☆ הוספה למועדפים', controls, async () => {
+    const updated = {...recipe, favorite:!recipe.favorite};
+    await store('readwrite', table => table.put(updated));
+    await refresh();
+    Object.assign(recipe, updated);
+    favorite.textContent = recipe.favorite ? '★ הסרה ממועדפים' : '☆ הוספה למועדפים';
+    favorite.setAttribute('aria-pressed', String(recipe.favorite));
+  });
+  favorite.setAttribute('aria-pressed', String(recipe.favorite));
+  button('עריכה', controls, () => edit(recipe));
+  button('מחיקה', controls, async () => {
+    if (!confirm('למחוק את המתכון?')) return;
+    await store('readwrite', table => table.delete(recipe.id));
+    await refresh();
+    home();
+  });
+  const label = element('label', 'מספר מנות או יחידות', article);
+  const count = element('input', '', label);
+  count.type = 'number';
+  count.min = '1';
+  count.step = '1';
+  count.value = recipe.servings;
+  element('h3', 'מצרכים', article);
+  const ingredients = lines(recipe.ingredients).map(line => {
+    const item = element('label', '', article);
+    const check = element('input', '', item);
+    check.type = 'checkbox';
+    return {line, text:element('span', ' ' + line, item)};
+  });
+  count.addEventListener('input', () => {
+    const ratio = count.valueAsNumber / Number(recipe.servings);
+    for (const item of ingredients) item.text.textContent = ' ' + scale(item.line, ratio > 0 ? ratio : 1);
+  });
+  element('h3', 'הוראות הכנה', article);
+  const steps = element('ol', '', article);
+  for (const step of lines(recipe.steps)) element('li', step, steps);
+  if (recipe.notes) {
+    element('h3', 'הערות וטיפים', article);
+    element('p', recipe.notes, article).className = 'note';
+  }
+  if (recipe.video) {
+    const link = element('a', 'פתיחת הסרטון המקורי', article);
+    link.href = recipe.video;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+  }
+  show('detail');
+}
+async function imageData(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    const scale = Math.min(1, 1200 / Math.max(image.width, image.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(image.width * scale));
+    canvas.height = Math.max(1, Math.round(image.height * scale));
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#fffaf4';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', .85);
+  } finally { URL.revokeObjectURL(url); }
+}
+function valid(recipe) {
+  return recipe && typeof recipe.id === 'string' && Number.isFinite(recipe.created) &&
+    typeof recipe.favorite === 'boolean' && fields.every(name => typeof recipe[name] === 'string') &&
+    recipe.title.trim() && lines(recipe.ingredients).length && lines(recipe.steps).length &&
+    categories.includes(recipe.category) && /^[1-9]\d*$/.test(recipe.servings) &&
+    (!recipe.video || /^https?:\/\//i.test(recipe.video)) &&
+    typeof recipe.photo === 'string' && (!recipe.photo || /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+=*$/.test(recipe.photo));
+}
+for (const name of categories) element('option', name, field('category'));
+form.addEventListener('submit', async event => {
+  event.preventDefault();
+  report('');
+  const submit = event.submitter;
+  submit.disabled = true;
+  const original = editing;
+  const recipe = {id:original?.id || crypto.randomUUID(), created:original?.created || Date.now(),
+    favorite:original?.favorite || false, photo:field('remove').checked ? '' : original?.photo || ''};
+  for (const name of fields) recipe[name] = field(name).value.trim();
+  try {
+    const file = field('photo').files[0];
+    if (file) {
+      try { recipe.photo = await imageData(file); }
+      catch { report('לא הצלחנו לפתוח את התמונה. אפשר לבחור תמונת JPG או PNG.'); return; }
+    }
+    if (!valid(recipe)) { report('יש למלא שם, מצרכים והוראות. קישור לסרטון צריך להתחיל ב־https:// או http://.'); return; }
+    await store('readwrite', table => table.put(recipe));
+    await refresh();
+    detail(recipe);
+    report('המתכון נשמר.');
+  } catch { report('לא הצלחנו לשמור את המתכון.'); }
+  finally { submit.disabled = false; }
+});
+document.querySelectorAll('.back').forEach(node => action(node, home));
+action(byId('add'), () => edit(null));
+action(byId('random'), () => {
+  if (recipes.length) detail(recipes[Math.floor(Math.random() * recipes.length)]);
+  else report('כדי לבחור מתכון אקראי, צריך להוסיף מתכון ראשון.');
+});
+byId('search').addEventListener('input', render);
+action(byId('backup'), async () => {
+  const data = await store('readonly', table => table.getAll());
+  const url = URL.createObjectURL(new Blob([JSON.stringify({version:1, recipes:data})], {type:'application/json'}));
+  const link = element('a', '', document.body);
+  link.href = url;
+  link.download = 'my-recipes-backup-' + new Date().toISOString().slice(0,10) + '.json';
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+});
+action(byId('restore'), () => byId('importFile').click());
+byId('importFile').addEventListener('change', async event => {
+  const file = event.target.files[0];
+  event.target.value = '';
+  if (!file) return;
+  try {
+    const data = JSON.parse(await file.text());
+    if (data?.version !== 1 || !Array.isArray(data.recipes) || !data.recipes.every(valid)) {
+      report('הקובץ אינו גיבוי מתאים לגרסה הזאת.');
+      return;
+    }
+    if (!confirm('לשחזר ' + data.recipes.length + ' מתכונים? מתכונים תואמים יעודכנו.')) return;
+    await store('readwrite', table => {
+      for (const recipe of data.recipes) table.put(recipe);
+    });
+    await refresh();
+    report('הגיבוי שוחזר.');
+  } catch { report('לא הצלחנו לקרוא או לשחזר את הגיבוי.'); }
+});
+refresh().catch(() => report('אחסון המתכונים אינו זמין בדפדפן כרגע.'));
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(console.error);
+</script>
