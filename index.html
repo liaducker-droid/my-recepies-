@@ -17,7 +17,7 @@
 <input id="search" type="search" placeholder="חיפוש מתכונים" aria-label="חיפוש מתכונים">
 <nav id="categories" class="row" aria-label="קטגוריות"></nav>
 <div id="lists"></div>
-<footer><div class="row"><button id="backup">הורדת גיבוי</button><button id="restore">שחזור מגיבוי</button></div>
+<footer><div class="row"><button id="backup">הורדת גיבוי</button><button id="restore">שחזור מגיבוי</button><button id="imageSettings">הגדרת תמונות AI</button></div>
 <small>המתכונים נשמרים במכשיר הזה. כדאי לשמור גיבוי לפני מעבר למכשיר אחר או מחיקת נתוני הדפדפן.</small>
 <input id="importFile" type="file" accept=".json,application/json" hidden></footer>
 </section>
@@ -41,6 +41,13 @@
 <button class="primary" type="submit">שמירת מתכון</button>
 </form>
 </section>
+<dialog id="imageDialog" dir="rtl">
+<form id="imageForm">
+<label>קוד הגישה שהגדרת ב־Cloudflare<input id="imageCode" type="password" autocomplete="off" required></label>
+<p>כשאין תמונה, שם המתכון יישלח ל־Cloudflare כדי ליצור תמונה.</p>
+<div class="row"><button type="submit" class="primary">הפעלה</button><button type="button" id="imageOff">כיבוי</button><button type="button" id="imageClose">סגירה</button></div>
+</form>
+</dialog>
 </main>
 <script>
 'use strict';
@@ -50,6 +57,10 @@ const fields = ['title','category','ingredients','steps','prep','cook','servings
 const form = byId('recipeForm');
 const field = name => form.elements.namedItem(name);
 const lines = value => value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+const imageEndpoint = 'https://recipe-image-generator.lia-ducker.workers.dev/';
+const codeKey = 'recipe-image-access';
+const generating = new Set();
+let viewedRecipe = null, viewedData = null;
 let recipes = [], category = '', editing = null;
 const db = new Promise((resolve, reject) => {
   const request = indexedDB.open('my-recipes', 1);
@@ -86,6 +97,7 @@ function button(label, parent, run) {
   return node;
 }
 function show(id) {
+  if (id !== 'detail') { viewedRecipe = null; viewedData = null; }
   for (const section of ['home','detail','editor']) byId(section).hidden = section !== id;
   window.scrollTo(0, 0);
 }
@@ -159,6 +171,8 @@ function scale(line, ratio) {
   });
 }
 function detail(recipe) {
+  viewedRecipe = recipe.id;
+  viewedData = recipe;
   const view = byId('detail');
   view.replaceChildren();
   button('חזרה לספר', view, home);
@@ -178,6 +192,10 @@ function detail(recipe) {
     favorite.setAttribute('aria-pressed', String(recipe.favorite));
   });
   favorite.setAttribute('aria-pressed', String(recipe.favorite));
+  if (!recipe.photo) {
+    const generate = button('יצירת תמונת AI', controls, () => generateImage(recipe));
+    generate.disabled = generating.has(recipe.id);
+  }
   button('עריכה', controls, () => edit(recipe));
   button('מחיקה', controls, async () => {
     if (!confirm('למחוק את המתכון?')) return;
@@ -216,6 +234,80 @@ function detail(recipe) {
     link.rel = 'noopener noreferrer';
   }
   show('detail');
+}
+function openImageSettings() {
+  byId('imageCode').value = localStorage.getItem(codeKey) || '';
+  byId('imageDialog').showModal();
+}
+action(byId('imageSettings'), openImageSettings);
+action(byId('imageClose'), () => byId('imageDialog').close());
+action(byId('imageOff'), () => {
+  localStorage.removeItem(codeKey);
+  byId('imageDialog').close();
+  report('יצירה אוטומטית של תמונות כובתה.');
+});
+byId('imageForm').addEventListener('submit', event => {
+  event.preventDefault();
+  const code = byId('imageCode').value.trim();
+  if (!code) return;
+  localStorage.setItem(codeKey, code);
+  byId('imageDialog').close();
+  report('יצירה אוטומטית של תמונות הופעלה במכשיר הזה.');
+});
+async function generateImage(recipe) {
+  const code = localStorage.getItem(codeKey);
+  if (!code) { openImageSettings(); return; }
+  if (generating.has(recipe.id)) return;
+  generating.add(recipe.id);
+  const control = viewedRecipe === recipe.id
+    ? [...byId('detail').querySelectorAll('button')].find(node => node.textContent === 'יצירת תמונת AI')
+    : null;
+  if (control) control.disabled = true;
+  report('יוצרת תמונה למתכון…');
+  try {
+    const response = await fetch(imageEndpoint, {
+      method:'POST',
+      headers:{'Content-Type':'application/json', Authorization:'Bearer ' + code},
+      body:JSON.stringify({title:recipe.title})
+    });
+    if (response.status === 401) { report('קוד הגישה לא תואם לקוד ב־Cloudflare.'); return; }
+    if (!response.ok) throw new Error('Image request failed');
+    const {image} = await response.json();
+    if (typeof image !== 'string' || !/^data:image\/jpeg;base64,[A-Za-z0-9+/]+=*$/.test(image)) {
+      throw new Error('Invalid image');
+    }
+    let updated;
+    await store('readwrite', table => {
+      const request = table.get(recipe.id);
+      request.onsuccess = () => {
+        const current = request.result;
+        if (current && current.title === recipe.title && !current.photo) {
+          updated = {...current, photo:image};
+          table.put(updated);
+        }
+      };
+    });
+    if (updated) {
+      await refresh();
+      if (viewedRecipe === recipe.id) {
+        const article = byId('detail').querySelector('article');
+        const imageNode = element('img', '');
+        imageNode.src = image;
+        imageNode.alt = '';
+        article.querySelector('h2').after(imageNode);
+        control?.remove();
+        if (viewedData) Object.assign(viewedData, updated);
+      }
+      report('תמונת ה־AI נשמרה במתכון.');
+    } else {
+      report('המתכון השתנה בזמן יצירת התמונה.');
+    }
+  } catch {
+    report('יצירת התמונה לא הצליחה. אפשר לנסות שוב מתוך המתכון.');
+  } finally {
+    generating.delete(recipe.id);
+    if (control) control.disabled = false;
+  }
 }
 async function imageData(file) {
   const url = URL.createObjectURL(file);
@@ -263,6 +355,7 @@ form.addEventListener('submit', async event => {
     await refresh();
     detail(recipe);
     report('המתכון נשמר.');
+    if (!original && !recipe.photo && localStorage.getItem(codeKey)) void generateImage(recipe);
   } catch { report('לא הצלחנו לשמור את המתכון.'); }
   finally { submit.disabled = false; }
 });
