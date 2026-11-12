@@ -11,13 +11,13 @@
 </style>
 <main>
 <header><h1>ספר המתכונים שלי</h1></header>
-<p id="status" role="status"></p>
+<p id="status" role="status"></p><small id="syncStatus" role="status"></small>
 <section id="home">
 <div class="row"><button id="add" class="primary">＋ מתכון חדש</button><button id="random">מה נכין היום?</button></div>
 <input id="search" type="search" placeholder="חיפוש מתכונים" aria-label="חיפוש מתכונים">
 <nav id="categories" class="row" aria-label="קטגוריות"></nav>
 <div id="lists"></div>
-<footer><div class="row"><button id="backup">הורדת גיבוי</button><button id="restore">שחזור מגיבוי</button><button id="imageSettings">הגדרת תמונות AI</button></div>
+<footer><div class="row"><button id="backup">הורדת גיבוי</button><button id="restore">שחזור מגיבוי</button><button id="imageSettings">הגדרת תמונות AI וסנכרון</button></div>
 <small>המתכונים נשמרים במכשיר הזה. כדאי לשמור גיבוי לפני מעבר למכשיר אחר או מחיקת נתוני הדפדפן.</small>
 <input id="importFile" type="file" accept=".json,application/json" hidden></footer>
 </section>
@@ -44,7 +44,7 @@
 <dialog id="imageDialog" dir="rtl">
 <form id="imageForm">
 <label>קוד הגישה שהגדרת ב־Cloudflare<input id="imageCode" type="password" autocomplete="off" required></label>
-<p>כשאין תמונה, שם המתכון יישלח ל־Cloudflare כדי ליצור תמונה.</p>
+<p>כשאין תמונה, שם המתכון יישלח ל־Cloudflare כדי ליצור תמונה. קוד הגישה גם מחבר את המכשיר לספר המתכונים המשותף ב־Cloudflare.</p>
 <div class="row"><button type="submit" class="primary">הפעלה</button><button type="button" id="imageOff">כיבוי</button><button type="button" id="imageClose">סגירה</button></div>
 </form>
 </dialog>
@@ -63,19 +63,42 @@ const generating = new Set();
 let viewedRecipe = null, viewedData = null;
 let recipes = [], category = '', editing = null;
 const db = new Promise((resolve, reject) => {
-  const request = indexedDB.open('my-recipes', 1);
-  request.onupgradeneeded = () => request.result.createObjectStore('recipes', {keyPath:'id'});
+  const request = indexedDB.open('my-recipes', 2);
+  request.onupgradeneeded = event => {
+    if (event.oldVersion === 0) request.result.createObjectStore('recipes', {keyPath:'id'});
+    request.result.createObjectStore('syncState', {keyPath:'id'});
+  };
   request.onsuccess = () => resolve(request.result);
   request.onerror = () => reject(request.error);
 });
-async function store(mode, work) {
+async function syncTransaction(mode, work) {
   const database = await db;
   return new Promise((resolve, reject) => {
-    const tx = database.transaction('recipes', mode);
-    const result = work(tx.objectStore('recipes'));
+    const tx = database.transaction(['recipes', 'syncState'], mode);
+    const result = work(tx.objectStore('recipes'), tx.objectStore('syncState'));
     tx.oncomplete = () => resolve(result?.result);
     tx.onabort = () => reject(tx.error);
   });
+}
+async function store(mode, work) {
+  const result = await syncTransaction(mode, (table, meta) => {
+    if (mode === 'readonly') return work(table);
+    return work({
+      get: id => table.get(id),
+      put(recipe) {
+        const request = table.put(recipe);
+        markLocal(meta, recipe.id, false);
+        return request;
+      },
+      delete(id) {
+        const request = table.delete(id);
+        markLocal(meta, id, true);
+        return request;
+      },
+    });
+  });
+  if (mode === 'readwrite') queueSync();
+  return result;
 }
 const report = message => { byId('status').textContent = message; };
 function action(node, run) {
@@ -244,7 +267,8 @@ action(byId('imageClose'), () => byId('imageDialog').close());
 action(byId('imageOff'), () => {
   localStorage.removeItem(codeKey);
   byId('imageDialog').close();
-  report('יצירה אוטומטית של תמונות כובתה.');
+  report('יצירה אוטומטית של תמונות וסנכרון כובו במכשיר הזה.');
+  syncStatus('');
 });
 byId('imageForm').addEventListener('submit', event => {
   event.preventDefault();
@@ -252,7 +276,8 @@ byId('imageForm').addEventListener('submit', event => {
   if (!code) return;
   localStorage.setItem(codeKey, code);
   byId('imageDialog').close();
-  report('יצירה אוטומטית של תמונות הופעלה במכשיר הזה.');
+  report('החיבור הופעל במכשיר הזה.');
+  queueSync(0);
 });
 async function generateImage(recipe) {
   const code = localStorage.getItem(codeKey);
@@ -395,6 +420,174 @@ byId('importFile').addEventListener('change', async event => {
     report('הגיבוי שוחזר.');
   } catch { report('לא הצלחנו לקרוא או לשחזר את הגיבוי.'); }
 });
-refresh().catch(() => report('אחסון המתכונים אינו זמין בדפדפן כרגע.'));
+const syncEndpoint = new URL('sync', imageEndpoint);
+const syncStatus = message => { byId('syncStatus').textContent = message; };
+let syncTimer, syncRunning = false;
+
+function queueSync(delay = 800) {
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(runSync, delay);
+}
+
+function markLocal(meta, id, deleted) {
+  const request = meta.get(id);
+  request.onsuccess = () => {
+    meta.put({id, revision:request.result?.revision || 0, token:crypto.randomUUID(), deleted});
+  };
+}
+
+async function initSync() {
+  await syncTransaction('readwrite', (table, meta) => {
+    const initialized = meta.get(0);
+    initialized.onsuccess = () => {
+      if (initialized.result) return;
+      const local = table.getAllKeys();
+      local.onsuccess = () => {
+        for (const id of local.result) markLocal(meta, id, false);
+        meta.put({id:0});
+      };
+    };
+  });
+}
+
+async function syncRequest(code, options = {}, id) {
+  const url = new URL(syncEndpoint);
+  if (id !== undefined) url.searchParams.set('id', id);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 25000);
+  try {
+    const response = await fetch(url, {
+      ...options, signal:controller.signal, cache:'no-store',
+      headers:{Authorization:'Bearer ' + code, ...(options.body && {'Content-Type':'application/json'})},
+    });
+    if (!response.ok) throw Object.assign(new Error('Sync request failed'), {status:response.status});
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function pendingRecord(id) {
+  const record = {};
+  await syncTransaction('readonly', (table, meta) => {
+    const state = meta.get(id);
+    const recipe = table.get(id);
+    state.onsuccess = () => { record.state = state.result; };
+    recipe.onsuccess = () => { record.recipe = recipe.result; };
+  });
+  return record;
+}
+
+async function acknowledge(sent, revision) {
+  await syncTransaction('readwrite', (_, meta) => {
+    const request = meta.get(sent.id);
+    request.onsuccess = () => {
+      const current = request.result;
+      if (!current || current.revision !== sent.revision) return;
+      meta.put({...current, revision, token:current.token === sent.token ? null : current.token});
+    };
+  });
+}
+
+function matchingRecipe(a, b) {
+  return a && b && Object.keys(a).length === Object.keys(b).length &&
+    Object.keys(a).every(key => a[key] === b[key]);
+}
+
+async function applyRemote(remote, expected) {
+  if (!remote.deleted && (!valid(remote.recipe) || remote.recipe.id !== remote.id)) {
+    throw new Error('Invalid remote recipe');
+  }
+  let conflict = false, applied = false;
+  await syncTransaction('readwrite', (table, meta) => {
+    const state = meta.get(remote.id);
+    state.onsuccess = () => {
+      const current = state.result;
+      if (current?.token !== expected?.token ||
+          (current?.revision || 0) >= remote.revision) return;
+      if (current?.token) {
+        const local = table.get(remote.id);
+        local.onsuccess = () => {
+          const equivalent = current.deleted
+            ? remote.deleted
+            : !remote.deleted && matchingRecipe(local.result, remote.recipe);
+          if (!equivalent && local.result) {
+            const copy = {...local.result, id:crypto.randomUUID(),
+              title:local.result.title.slice(0, 134) + ' (עותק מקומי)'};
+            table.put(copy);
+            markLocal(meta, copy.id, false);
+          }
+          conflict = !equivalent;
+          install();
+        };
+      } else install();
+
+      function install() {
+        if (remote.deleted) table.delete(remote.id);
+        else table.put(remote.recipe);
+        meta.put({id:remote.id, revision:remote.revision, token:null, deleted:remote.deleted});
+        applied = true;
+      }
+    };
+  });
+  return {conflict, applied};
+}
+
+async function runSync() {
+  if (syncRunning || document.hidden) return;
+  const code = localStorage.getItem(codeKey);
+  if (!code) { syncStatus(''); return; }
+  if (!navigator.onLine) { syncStatus('הסנכרון יתחדש כשהחיבור יחזור.'); return; }
+  syncRunning = true;
+  let conflict = false, changed = false, oversized = false;
+  try {
+    await initSync();
+    const states = await syncTransaction('readonly', (_, meta) => meta.getAll());
+    for (const entry of states.filter(item => item.token)) {
+      const {state, recipe} = await pendingRecord(entry.id);
+      if (!state?.token) continue;
+      try {
+        const result = await syncRequest(code, {
+          method:'POST',
+          body:JSON.stringify({id:state.id, revision:state.revision, deleted:state.deleted, recipe})
+        });
+        await acknowledge(state, result.revision);
+      } catch (error) {
+        if (error.status === 413) { oversized = true; continue; }
+        if (error.status !== 409) throw error;
+        const remote = await syncRequest(code, {}, state.id);
+        const result = await applyRemote(remote, state);
+        conflict ||= result.conflict;
+        changed ||= result.applied;
+      }
+    }
+
+    const {recipes:remoteList} = await syncRequest(code);
+    for (const entry of remoteList) {
+      const {state} = await pendingRecord(entry.id);
+      if ((state?.revision || 0) >= entry.revision || state?.token) continue;
+      const remote = await syncRequest(code, {}, entry.id);
+      const result = await applyRemote(remote, state);
+      changed ||= result.applied;
+    }
+    if (conflict) report('נמצאו שינויים בשני מכשירים. גרסה מקומית שונה נשמרה כעותק כשהייתה זמינה.');
+    const remaining = await syncTransaction('readonly', (_, meta) => meta.getAll());
+    syncStatus(oversized ? 'מתכון גדול מדי לסנכרון נשאר שמור במכשיר.' :
+      remaining.some(item => item.token) ? 'יש שינויים שממתינים לסנכרון.' : 'המתכונים מסונכרנים.');
+  } catch (error) {
+    syncStatus(error.status === 401 ? 'קוד הגישה לסנכרון אינו תואם. אפשר לעדכן אותו בהגדרות.' :
+      'הסנכרון לא הושלם. ננסה שוב אוטומטית.');
+  } finally {
+    syncRunning = false;
+    if (changed) await refresh();
+  }
+}
+
+window.addEventListener('online', () => queueSync());
+window.addEventListener('focus', () => queueSync());
+document.addEventListener('visibilitychange', () => { if (!document.hidden) queueSync(); });
+setInterval(() => queueSync(0), 25000);
+
+refresh().then(() => queueSync(0)).catch(() => report('אחסון המתכונים אינו זמין בדפדפן כרגע.'));
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(console.error);
 </script>
