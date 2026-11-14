@@ -8,11 +8,28 @@
 <title>ספר המתכונים שלי</title>
 <style>
 *{box-sizing:border-box}body{margin:0;background:#f9f2e8;color:#35271f;font:17px system-ui,sans-serif}main{max-width:740px;margin:auto;padding:24px 18px 48px}h1,h2{font-family:Georgia,serif}h1{font-size:clamp(2rem,8vw,3.8rem);margin:.3em 0}button,input,textarea,select{font:inherit;color:inherit}button,input,textarea,select{padding:10px 13px;border:1px solid #cdbbac;border-radius:12px;background:#fffaf4}button{cursor:pointer;min-height:44px}button.primary,button[aria-pressed=true]{background:#713c2a;color:white;border-color:#713c2a}input,textarea,select{width:100%}input[type=checkbox]{width:auto}textarea{min-height:90px}label{display:block;margin:12px 0}.row{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(180px,100%),1fr));gap:10px}.card{text-align:start;overflow-wrap:anywhere}.card img,article img{display:block;width:100%;aspect-ratio:3/2;object-fit:cover;border-radius:9px;margin-bottom:8px}article,form{padding:18px;background:#fffaf4;border-radius:18px}p,li{overflow-wrap:anywhere}li{margin-block:8px}.note{white-space:pre-wrap}small{color:#624e43}a{color:#713c2a}
+
+#landing h1{margin:22px 0 26px;font-size:clamp(2.45rem,10vw,4.7rem);line-height:1.08}
+#landing h2{font-size:1.4rem;margin-bottom:10px}
+#featured{display:flex;gap:12px;overflow-x:auto;scroll-snap-type:x mandatory;padding:4px 2px 12px}
+#featured .card{flex:0 0 min(76vw,300px);scroll-snap-align:start;padding:10px}
+#featured .card img,#featured .placeholder{aspect-ratio:3/2;border-radius:9px}
+#featured .placeholder{display:grid;place-items:center;background:#ead8c8;font-size:2.4rem;margin-bottom:8px}
+#allRecipes{width:100%;margin-top:16px}
+#bookHeader{margin-bottom:12px}
 </style>
 <main>
-<header><h1>ספר המתכונים שלי</h1></header>
+
 <p id="status" role="status"></p><small id="syncStatus" role="status"></small>
-<section id="home">
+<section id="landing">
+<h1>ספר המתכונים שלי</h1>
+<h2 id="featuredHeading">מתכונים מהספר</h2>
+<div id="featured" role="region" aria-labelledby="featuredHeading"></div>
+<p id="featuredEmpty" hidden>כשתוסיפי מתכונים, הם יופיעו כאן.</p>
+<button id="allRecipes" class="primary">לכל המתכונים</button>
+</section>
+<section id="home" hidden>
+<header id="bookHeader"><button id="backLanding">חזרה למסך הבית</button><h1>כל המתכונים</h1></header>
 <div class="row"><button id="add" class="primary">＋ מתכון חדש</button><button id="random">מה נכין היום?</button></div>
 <input id="search" type="search" placeholder="חיפוש מתכונים" aria-label="חיפוש מתכונים">
 <nav id="categories" class="row" aria-label="קטגוריות"></nav>
@@ -121,7 +138,7 @@ function button(label, parent, run) {
 }
 function show(id) {
   if (id !== 'detail') { viewedRecipe = null; viewedData = null; }
-  for (const section of ['home','detail','editor']) byId(section).hidden = section !== id;
+  for (const section of ['landing','home','detail','editor']) byId(section).hidden = section !== id;
   window.scrollTo(0, 0);
 }
 function photo(recipe, parent) {
@@ -163,9 +180,43 @@ function render() {
     if (matches.length > 4) group('כל המתכונים', matches, '');
   }
 }
+let featuredIds = [];
+function renderFeatured() {
+  const available = new Map(recipes.map(recipe => [recipe.id, recipe]));
+  featuredIds = featuredIds.filter(id => available.has(id));
+  const pool = recipes.filter(recipe => !featuredIds.includes(recipe.id));
+  while (featuredIds.length < 5 && pool.length) {
+    const index = Math.floor(Math.random() * pool.length);
+    featuredIds.push(pool.splice(index, 1)[0].id);
+  }
+
+  const carousel = byId('featured');
+  const scrollPosition = carousel.scrollLeft;
+  carousel.replaceChildren();
+  byId('featuredEmpty').hidden = featuredIds.length > 0;
+  byId('featuredHeading').hidden = featuredIds.length === 0;
+  for (const id of featuredIds) {
+    const recipe = available.get(id);
+    const card = button('', carousel, () => detail(recipe, 'landing'));
+    card.className = 'card';
+    if (recipe.photo) photo(recipe, card);
+    else {
+      const placeholder = element('span', '🍴', card);
+      placeholder.className = 'placeholder';
+      placeholder.setAttribute('aria-hidden', 'true');
+    }
+    element('strong', recipe.title, card);
+    element('div', recipe.category, card);
+  }
+  carousel.scrollLeft = scrollPosition;
+}
+action(byId('allRecipes'), home);
+action(byId('backLanding'), () => show('landing'));
+
 async function refresh() {
   recipes = (await store('readonly', table => table.getAll())).sort((a,b) => b.created - a.created);
   render();
+  renderFeatured();
 }
 function home() { render(); show('home'); }
 function edit(recipe) {
@@ -193,12 +244,13 @@ function scale(line, ratio) {
     return Number.isFinite(quantity) ? new Intl.NumberFormat('he', {maximumSignificantDigits:4}).format(quantity * ratio) : value;
   });
 }
-function detail(recipe) {
+function detail(recipe, origin = 'home') {
   viewedRecipe = recipe.id;
   viewedData = recipe;
   const view = byId('detail');
   view.replaceChildren();
-  button('חזרה לספר', view, home);
+  button(origin === 'landing' ? 'חזרה למסך הבית' : 'חזרה לספר', view,
+    () => origin === 'landing' ? show('landing') : home());
   const article = element('article', '', view);
   element('h2', recipe.title, article);
   photo(recipe, article);
