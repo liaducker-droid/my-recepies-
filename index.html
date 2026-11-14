@@ -11,8 +11,13 @@
 
 #landing h1{margin:22px 0 26px;font-size:clamp(2.45rem,10vw,4.7rem);line-height:1.08}
 #landing h2{font-size:1.4rem;margin-bottom:10px}
-#featured{display:flex;gap:12px;overflow-x:auto;scroll-snap-type:x mandatory;padding:4px 2px 12px}
-#featured .card{flex:0 0 min(76vw,300px);scroll-snap-align:start;padding:10px}
+#featured{display:flex;gap:12px;overflow-x:auto;scroll-snap-type:x mandatory;padding:8px max(12%, calc((100% - 340px)/2)) 14px;scrollbar-width:none;--card-width:min(76vw,340px)}
+#featured::-webkit-scrollbar{display:none}
+#featured .card{flex:0 0 var(--card-width);scroll-snap-align:center;padding:10px;opacity:.68;scale:.9;transition:scale .3s,opacity .3s}
+#featured .card.is-current{opacity:1;scale:1}
+#featuredControls[hidden]{display:none}
+#featuredControls{justify-content:center;align-items:center}
+@media(prefers-reduced-motion:reduce){#featured .card{transition:none}}
 #featured .card img,#featured .placeholder{aspect-ratio:3/2;border-radius:9px}
 #featured .placeholder{display:grid;place-items:center;background:#ead8c8;font-size:2.4rem;margin-bottom:8px}
 #allRecipes{width:100%;margin-top:16px}
@@ -25,6 +30,11 @@
 <h1>ספר המתכונים שלי</h1>
 <h2 id="featuredHeading">מתכונים מהספר</h2>
 <div id="featured" role="region" aria-labelledby="featuredHeading"></div>
+<div id="featuredControls" class="row" hidden>
+<button id="featuredPrev" aria-label="המתכון הקודם">→</button>
+<button id="featuredPause">השהיה</button>
+<button id="featuredNext" aria-label="המתכון הבא">←</button>
+</div>
 <p id="featuredEmpty" hidden>כשתוסיפי מתכונים, הם יופיעו כאן.</p>
 <button id="allRecipes" class="primary">לכל המתכונים</button>
 </section>
@@ -140,6 +150,7 @@ function show(id) {
   if (id !== 'detail') { viewedRecipe = null; viewedData = null; }
   for (const section of ['landing','home','detail','editor']) byId(section).hidden = section !== id;
   window.scrollTo(0, 0);
+  if (id === 'landing') requestAnimationFrame(highlightFeatured);
 }
 function photo(recipe, parent) {
   if (recipe.photo) {
@@ -181,6 +192,65 @@ function render() {
   }
 }
 let featuredIds = [];
+const featured = byId('featured');
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+let paused = reducedMotion.matches;
+let nextAuto = Date.now() + 5000;
+
+function currentFeatured() {
+  const bounds = featured.getBoundingClientRect();
+  const center = bounds.left + bounds.width / 2;
+  let distance = Infinity;
+  let current = 0;
+  [...featured.children].forEach((card, index) => {
+    const rect = card.getBoundingClientRect();
+    const offset = Math.abs(rect.left + rect.width / 2 - center);
+    if (offset < distance) { distance = offset; current = index; }
+  });
+  return current;
+}
+
+function highlightFeatured() {
+  const current = currentFeatured();
+  [...featured.children].forEach((card, index) => card.classList.toggle('is-current', index === current));
+}
+
+function moveFeatured(direction) {
+  const count = featured.children.length;
+  if (count < 2) return;
+  const current = currentFeatured();
+  const target = (current + direction + count) % count;
+  const card = featured.children[target].getBoundingClientRect();
+  const track = featured.getBoundingClientRect();
+  featured.scrollBy({
+    left:card.left + card.width / 2 - track.left - track.width / 2,
+    behavior:reducedMotion.matches || Math.abs(target - current) > 1 ? 'instant' : 'smooth'
+  });
+  nextAuto = Date.now() + 5000;
+}
+
+function updatePause() {
+  byId('featuredPause').textContent = paused ? 'הפעלה' : 'השהיה';
+}
+updatePause();
+action(byId('featuredPause'), () => {
+  paused = !paused;
+  nextAuto = Date.now() + 5000;
+  updatePause();
+});
+action(byId('featuredPrev'), () => moveFeatured(-1));
+action(byId('featuredNext'), () => moveFeatured(1));
+featured.addEventListener('scroll', () => {
+  highlightFeatured();
+  nextAuto = Date.now() + 5000;
+}, {passive:true});
+window.addEventListener('resize', highlightFeatured);
+setInterval(() => {
+  if (paused || document.hidden || byId('landing').hidden ||
+      featured.contains(document.activeElement) || Date.now() < nextAuto) return;
+  moveFeatured(1);
+}, 500);
+
 function renderFeatured() {
   const available = new Map(recipes.map(recipe => [recipe.id, recipe]));
   featuredIds = featuredIds.filter(id => available.has(id));
@@ -209,6 +279,8 @@ function renderFeatured() {
     element('div', recipe.category, card);
   }
   carousel.scrollLeft = scrollPosition;
+  byId('featuredControls').hidden = featuredIds.length < 2;
+  highlightFeatured();
 }
 action(byId('allRecipes'), home);
 action(byId('backLanding'), () => show('landing'));
