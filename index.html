@@ -195,7 +195,7 @@ let featuredIds = [];
 const featured = byId('featured');
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
 let paused = reducedMotion.matches;
-let nextAuto = Date.now() + 5000;
+let nextAuto = Date.now() + 3000;
 
 function currentFeatured() {
   const bounds = featured.getBoundingClientRect();
@@ -226,7 +226,7 @@ function moveFeatured(direction) {
     left:card.left + card.width / 2 - track.left - track.width / 2,
     behavior:reducedMotion.matches || Math.abs(target - current) > 1 ? 'instant' : 'smooth'
   });
-  nextAuto = Date.now() + 5000;
+  nextAuto = Date.now() + 3000;
 }
 
 function updatePause() {
@@ -235,14 +235,14 @@ function updatePause() {
 updatePause();
 action(byId('featuredPause'), () => {
   paused = !paused;
-  nextAuto = Date.now() + 5000;
+  nextAuto = Date.now() + 3000;
   updatePause();
 });
 action(byId('featuredPrev'), () => moveFeatured(-1));
 action(byId('featuredNext'), () => moveFeatured(1));
 featured.addEventListener('scroll', () => {
   highlightFeatured();
-  nextAuto = Date.now() + 5000;
+  nextAuto = Date.now() + 3000;
 }, {passive:true});
 window.addEventListener('resize', highlightFeatured);
 setInterval(() => {
